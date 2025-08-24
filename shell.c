@@ -322,99 +322,140 @@ void executeCommandRedirection(bool *exit_flag)
 
 void executeCommandPipe(bool *exit_flag) {
 	/* flow : 
-		> i = 1
-		> while( i < cmds_count) char *cmd1 = cmds[i-1], *cmd2 = cmds[i]
-		> parse cmd1 and cmd2 into args1 and args2
-		> create a pipe
-		> fork a new process
-		> in child process :
-			- redirect stdout to write end of pipe
-			- close read end of pipe
-			- exec cmd1
-		> in parent process :
-			- wait for child to terminate
-			- redirect stdin to read end of pipe
-			- close write end of pipe
-			- exec cmd2
-		> i = i + 1
+		before loop : 
+			> fork a child
+			> inside child : 
+				> redirect stdout to write end of pipe
+				> execute first command, return if exec fails
+		inside loop :
+			> wait for child to terminate
+			> fork a child process, inside it: 
+				> redirect stdin of shell to read end of pipe
+				> redirect stdout of shell to write end of pipe
+				> execute next command, return if exec fails
+		after loop :
+			return
+
 	*/
 
 	if( cmd_count < 2 ) {
 		printf("Shell: Incorrect command\n");
 		return;
 	}
-	pid_t shell_pid = getpid();
-	char *cmd1, *cmd2;
-	int i = 0;
-	char *args1[100], *args2[100];
-	int arg_count1 = 0, arg_count2 = 0;
 
-	while( i < cmd_count - 1 ) {
-		cmd1 = cmds[i];
-		cmd2 = cmds[i+1];
-		tokenize(cmd1, args1, &arg_count1, " \n");
-		tokenize(cmd2, args2, &arg_count2, " \n");
+	int pipefd[2];
+	if( pipe(pipefd) == -1 ) {
+		error_flag = true;
+		return;
+	}
 
-		int pipefd[2];
-		if( pipe(pipefd) < 0 ) {
+	/* first command */
+	// pid_t shell_pid = getpid();
+	pid_t pid = fork();
+	if( pid < 0 ) {
+		error_flag = true;
+		return;
+	}
+	else if( pid == 0 ) {
+		/* child process */
+		signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+		signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+		/* redirect stdout to write end of pipe */
+		close(pipefd[0]); // close unused read end
+		close(STDOUT_FILENO);
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[1]);
+
+		/* execute first command */
+		char *cmd = cmds[0];
+		char *args[100];
+		int arg_count = 0;
+		tokenize(cmd, args, &arg_count, " \n");
+
+		if( execvp(args[0], args) < 0 ) {
+			printf("Shell: Incorrect command\n");
+			return;
+		}
+	}
+	else {
+		/* parent process */
+		wait(NULL);	// wait for child to terminate
+	}
+
+	/* loop for middle commands */
+	for( int i = 1; i < cmd_count - 1; i++ ) {
+		// if( getpid() != shell_pid ) return;
+
+		pid = fork();
+		if( pid < 0 ) {
 			error_flag = true;
 			return;
 		}
+		else if( pid == 0 ) {
+			/* child process */
+			signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+			signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
 
-		if( getpid() != shell_pid ) return; // ensure that child process doesn't loop if exec fails
+			/* redirect stdin to read end of pipe , and stdout to write end */
+			close(STDIN_FILENO);
+			close(STDOUT_FILENO);
+			dup2(pipefd[0], STDIN_FILENO);
+			dup2(pipefd[1], STDOUT_FILENO);
+			close(pipefd[0]);
+			close(pipefd[1]);
 
-		pid_t subshell_pid = fork(); // for executing pipes, so that shell parent process is not affected
-		if( subshell_pid < 0 ) {
-			error_flag = true;
-			return;
-		}
-		else if( subshell_pid == 0 ) {
-			/* subshell process */
-			/* now fork to create child process for cmd1 */
-			pid_t pid = fork();
-			if( pid < 0 ) {
-				error_flag = true;
+			/* execute next command */
+			char *cmd = cmds[i];
+			char *args[100];
+			int arg_count = 0;
+			tokenize(cmd, args, &arg_count, " \n");
+			if( execvp(args[0], args) < 0 ) {
+				printf("Shell: Incorrect command\n");
 				return;
-			}
-			else if( pid == 0 ) {
-				/* child process - we will write in this one */
-				signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
-				signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
-
-				/* redirect stdout to write end of pipe */
-				dup2(pipefd[1], STDOUT_FILENO);
-				close(pipefd[0]); // close read end of pipe
-
-				/* execute cmd1 */
-				if( execvp(args1[0], args1) < 0 ) {
-					printf("Shell: Incorrect command\n");
-					error_flag = true;
-					return;
-				}
-			}
-			else {
-				/* parent process */
-				wait(NULL); // wait for child to terminate
-
-				/* redirect stdin to read end of pipe */
-				dup2(pipefd[0], STDIN_FILENO);
-				close(pipefd[1]); // close write end of pipe
-
-				/* execute cmd2 */
-				if( execvp(args2[0], args2) < 0 ) {
-					printf("Shell: Incorrect command\n");
-					error_flag = true;
-					return;
-				}
 			}
 		}
 		else {
 			/* parent process */
-			waitpid(subshell_pid, NULL, 0); // wait for subshell to terminate
+			wait(NULL);	// wait for child to terminate
 		}
-
-		i = i + 1;
 	}
+
+	/* last command */
+	// if( getpid() != shell_pid ) return;
+	pid = fork();
+	if( pid < 0 ) {
+		error_flag = true;
+		return;
+	}
+	else if( pid == 0 ) {
+		/* child process */
+		signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+		signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+		/* redirect stdin to read end of pipe */
+		close(pipefd[1]); // close unused write end
+		close(STDIN_FILENO);
+		dup2(pipefd[0], STDIN_FILENO);
+		close(pipefd[0]);
+
+		/* execute last command */
+		char *cmd = cmds[cmd_count - 1];
+		char *args[100];
+		int arg_count = 0;
+		tokenize(cmd, args, &arg_count, " \n");
+		if( execvp(args[0], args) < 0 ) {
+			printf("Shell: Incorrect command\n");
+			return;
+		}
+	}
+	else {
+		/* parent process */
+		waitpid(pid, NULL, 1);	// wait for child to terminate
+	}
+
+	close(pipefd[0]);
+	close(pipefd[1]);
 }
 
 
