@@ -33,6 +33,25 @@ typedef enum{false, true} bool;
 
 char **cmds = NULL;
 int cmd_count = 0;
+void printPrompt()
+{
+	// This function will print the prompt in format - currentWorkingDirectory$
+	char currWorkingDirectory[1024];
+	getcwd(currWorkingDirectory, sizeof(currWorkingDirectory));
+	printf("%s$", currWorkingDirectory);
+}
+
+void print2dStr(char **args)
+{
+	// This function will print debug information
+	while( *args != NULL ) {
+		printf("%s\n", *args);
+		args++;
+	}
+}
+
+
+
 void parseInput(char *line, cmd_t *cmd_type)
 {
 
@@ -46,9 +65,11 @@ void parseInput(char *line, cmd_t *cmd_type)
 		char *token = strsep(&line, "&&");
 		while( token != NULL ) {
 			/* append to cmds */
-			cmd_count = cmd_count + 1;
-			cmds = realloc(cmds, sizeof(char*) * cmd_count);
-			cmds[cmd_count-1] = token;
+			if( strlen(token) != 0 ) {
+				cmd_count = cmd_count + 1;
+				cmds = realloc(cmds, sizeof(char*) * cmd_count);
+				cmds[cmd_count-1] = token;
+			}
 
 			token = strsep(&line, "&&");
 		}
@@ -59,9 +80,12 @@ void parseInput(char *line, cmd_t *cmd_type)
 		char *token = strsep(&line, "##");
 		while( token != NULL ) {
 			/* append to cmds */
-			cmd_count = cmd_count + 1;
-			cmds = realloc(cmds, sizeof(char*) * cmd_count);
-			cmds[cmd_count-1] = token;
+			if( strlen(token) != 0 ) {
+				cmd_count = cmd_count + 1;
+				cmds = realloc(cmds, sizeof(char*) * cmd_count);
+				cmds[cmd_count-1] = token;
+			}
+			
 			token = strsep(&line, "##");
 		}
 	}
@@ -71,9 +95,11 @@ void parseInput(char *line, cmd_t *cmd_type)
 		char *token = strsep(&line, ">");
 		while( token != NULL ) {
 			/* append to cmds */
-			cmd_count = cmd_count + 1;
-			cmds = realloc(cmds, sizeof(char*) * cmd_count);
-			cmds[cmd_count-1] = token;
+			if( strlen(token) != 0 ) {
+				cmd_count = cmd_count + 1;
+				cmds = realloc(cmds, sizeof(char*) * cmd_count);
+				cmds[cmd_count-1] = token;
+			}
 			token = strsep(&line, ">");
 		}
 	}
@@ -88,6 +114,14 @@ void parseInput(char *line, cmd_t *cmd_type)
 void tokenize(char *cmd, char **args, int *arg_count, const char *delim)
 {
 	/* parse command into program and arguments */
+	/* remove leading and trailing spaces and new line */
+	while( cmd != NULL && (cmd[0] == ' ' || cmd[0] == '\n') ) cmd++;
+	char *end = cmd + strlen(cmd) - 1;
+	while( end > cmd && (end[0] == ' ' || end[0] == '\n') ) {
+		end[0] = '\0';
+		end--;
+	}
+	
 	*arg_count = 0;
 	char *token = strsep(&cmd, delim);
 	while( token != NULL ) {
@@ -132,7 +166,7 @@ void executeCommand(char *cmd, bool *exit_flag)
 	/* else fork a new process to execute the command */
 	pid_t pid = fork();
 	if( pid < 0 ) {
-		printf("Fork failed.\n");
+		printf("Shell: Incorrect command\n");
 		return;
 	}
 	else if( pid == 0 ) {
@@ -142,7 +176,7 @@ void executeCommand(char *cmd, bool *exit_flag)
 		/* execute command */
 	
 		if( execvp(args[0], args) < 0 ) {
-			// printf("Error executing command %s\n", args[0]);
+			printf("Shell: Incorrect command\n");
 			return;
 		}
 	}
@@ -160,14 +194,14 @@ void executeParallelCommands(bool *exit_flag)
 		return;
 	}
 	pid_t pids[cmd_count];
-	pid_t ppid = getpid();
+	pid_t shell_pid = getpid();
 
 	for( int i = 0; i < cmd_count; i++ ) {
 		char *cmd = cmds[i];
 		
 		/* call executeCommand() in a new process */
 		/* ensure that child process doesn't fork */
-		if( getpid() != ppid ) return;
+		if( getpid() != shell_pid ) return;
 
 		pids[i] = fork();
 		if( pids[i] < 0 ) {
@@ -181,6 +215,12 @@ void executeParallelCommands(bool *exit_flag)
 		else {
 			/* parent process */
 			// do nothing
+		}
+	}
+	if( getpid() == shell_pid ) {
+		/* parent process */
+		for( int i = 0; i < cmd_count; i++ ) {
+			waitpid(pids[i], NULL, 0);	// wait for all child processes to terminate
 		}
 	}
 }
@@ -240,7 +280,7 @@ void executeCommandRedirection(bool *exit_flag)
 		/* open outfile for writing */
 		int fd = open(outfile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
 		if( fd < 0 ) {
-			printf("Shell: Error opening file %s\n", outfile);
+			printf("Shell: Incorrect command\n");
 			return;
 		}
 		/* redirect stdout to fd */
@@ -259,13 +299,6 @@ void executeCommandRedirection(bool *exit_flag)
 	}
 }
 
-void printPrompt()
-{
-	// This function will print the prompt in format - currentWorkingDirectory$
-	char currWorkingDirectory[1024];
-	getcwd(currWorkingDirectory, sizeof(currWorkingDirectory));
-	printf("%s$", currWorkingDirectory);
-}
 
 int main()
 {
@@ -275,10 +308,11 @@ int main()
 	signal(SIGTSTP, SIG_IGN);	// ignore SIGTSTP in the shell process
 	bool exit_flag = false;
 
-	int debug_cntr = 0; // debug
+	pid_t shell_pid = getpid(); 
 
 	while(1)	// This loop will keep your shell running until user exits.
 	{
+		if( getpid() != shell_pid ) return 0; // ensure that any child process doesn't loop
 		// Print the prompt in format - currentWorkingDirectory$
 		printPrompt();
 
