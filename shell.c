@@ -33,6 +33,7 @@ typedef enum{false, true} bool;
 
 bool error_flag = false;
 
+
 char **cmds = NULL;
 int cmd_count = 0;
 void printPrompt()
@@ -46,9 +47,20 @@ void printPrompt()
 void print2dStr(char **args)
 {
 	// This function will print debug information
-	while( *args != NULL ) {
-		printf("%s\n", *args);
-		args++;
+	// run as a different process to avoid writing to pipe
+	pid_t pid = fork();
+
+	if( pid == 0 ) {	
+		int fd = open("debug_info.txt", O_CREAT | O_WRONLY | O_TRUNC, 0666);
+		dup2(STDOUT_FILENO, fd);
+		close(fd);
+		while( *args != NULL ) {
+			printf("\"%s\"\n", *args);
+			args++;
+		}
+	}
+	else if( pid > 0 ) {
+		waitpid(pid, NULL, 0);
 	}
 }
 
@@ -372,7 +384,7 @@ void executeCommandPipe(bool *exit_flag) {
 		char *args[100];
 		int arg_count = 0;
 		tokenize(cmd, args, &arg_count, " \n");
-
+		print2dStr(args); // debug
 		if( execvp(args[0], args) < 0 ) {
 			printf("Shell: Incorrect command\n");
 			return;
@@ -410,6 +422,7 @@ void executeCommandPipe(bool *exit_flag) {
 			char *args[100];
 			int arg_count = 0;
 			tokenize(cmd, args, &arg_count, " \n");
+			print2dStr(args); // debug
 			if( execvp(args[0], args) < 0 ) {
 				printf("Shell: Incorrect command\n");
 				return;
@@ -423,6 +436,12 @@ void executeCommandPipe(bool *exit_flag) {
 
 	/* last command */
 	// if( getpid() != shell_pid ) return;
+	char *cmd = cmds[cmd_count - 1];
+	char *args[100];
+	int arg_count = 0;
+	tokenize(cmd, args, &arg_count, " \n");
+	print2dStr(args); // debug
+	
 	pid = fork();
 	if( pid < 0 ) {
 		error_flag = true;
@@ -440,10 +459,6 @@ void executeCommandPipe(bool *exit_flag) {
 		close(pipefd[0]);
 
 		/* execute last command */
-		char *cmd = cmds[cmd_count - 1];
-		char *args[100];
-		int arg_count = 0;
-		tokenize(cmd, args, &arg_count, " \n");
 		if( execvp(args[0], args) < 0 ) {
 			printf("Shell: Incorrect command\n");
 			return;
@@ -451,7 +466,8 @@ void executeCommandPipe(bool *exit_flag) {
 	}
 	else {
 		/* parent process */
-		waitpid(pid, NULL, 1);	// wait for child to terminate
+		wait(NULL);
+		//waitpid(pid, NULL, 1);	// wait for child to terminate
 	}
 
 	close(pipefd[0]);

@@ -28,8 +28,10 @@ as you not need to use any features for this assignment that are supported by C+
 /* extra functions being used and their dependencies:
 	getcwd() : unistd.h
 */
-typedef enum{PAR, SEQ, RED, SINGLE} cmd_t;
+typedef enum{PAR, SEQ, RED, PIPE, SINGLE, ERR} cmd_t;
 typedef enum{false, true} bool;
+
+bool error_flag = false;
 
 char **cmds = NULL;
 int cmd_count = 0;
@@ -101,6 +103,25 @@ void parseInput(char *line, cmd_t *cmd_type)
 				cmds[cmd_count-1] = token;
 			}
 			token = strsep(&line, ">");
+		}
+	}
+	else if( strstr(line, "|") != NULL ) {
+		*cmd_type = PIPE;
+		/* separate into mutliple commands string */
+		char *token = strsep(&line, "|");
+		while( token != NULL ) {
+			/* append to cmds */
+			if( strlen(token) != 0 ) {
+				cmd_count = cmd_count + 1;
+				cmds = realloc(cmds, sizeof(char*) * cmd_count);
+				cmds[cmd_count-1] = token;
+			}
+			else {
+				/* incorrect command */
+				*cmd_type = ERR;
+				return;
+			}
+			token = strsep(&line, "|");
 		}
 	}
 	else {
@@ -299,6 +320,148 @@ void executeCommandRedirection(bool *exit_flag)
 	}
 }
 
+void executeCommandPipe(bool *exit_flag) {
+	/* flow : 
+		before loop : 
+			> fork a child
+			> inside child : 
+				> redirect stdout to write end of pipe
+				> execute first command, return if exec fails
+		inside loop :
+			> wait for child to terminate
+			> fork a child process, inside it: 
+				> redirect stdin of shell to read end of pipe
+				> redirect stdout of shell to write end of pipe
+				> execute next command, return if exec fails
+		after loop :
+			return
+
+	*/
+
+	if( cmd_count < 2 ) {
+		printf("Shell: Incorrect command\n");
+		return;
+	}
+
+	int pipefd[2];
+	if( pipe(pipefd) == -1 ) {
+		error_flag = true;
+		return;
+	}
+
+	/* first command */
+	// pid_t shell_pid = getpid();
+	pid_t pid = fork();
+	if( pid < 0 ) {
+		error_flag = true;
+		return;
+	}
+	else if( pid == 0 ) {
+		/* child process */
+		signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+		signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+		/* redirect stdout to write end of pipe */
+		close(pipefd[0]); // close unused read end
+		close(STDOUT_FILENO);
+		dup2(pipefd[1], STDOUT_FILENO);
+		close(pipefd[1]);
+
+		/* execute first command */
+		char *cmd = cmds[0];
+		char *args[100];
+		int arg_count = 0;
+		tokenize(cmd, args, &arg_count, " \n");
+
+		if( execvp(args[0], args) < 0 ) {
+			printf("Shell: Incorrect command\n");
+			return;
+		}
+	}
+	else {
+		/* parent process */
+		wait(NULL);	// wait for child to terminate
+	}
+
+	/* loop for middle commands */
+	for( int i = 1; i < cmd_count - 1; i++ ) {
+		// if( getpid() != shell_pid ) return;
+
+		pid = fork();
+		if( pid < 0 ) {
+			error_flag = true;
+			return;
+		}
+		else if( pid == 0 ) {
+			/* child process */
+			signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+			signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+			/* redirect stdin to read end of pipe , and stdout to write end */
+			close(STDIN_FILENO);
+			close(STDOUT_FILENO);
+			dup2(pipefd[0], STDIN_FILENO);
+			dup2(pipefd[1], STDOUT_FILENO);
+			close(pipefd[0]);
+			close(pipefd[1]);
+
+			/* execute next command */
+			char *cmd = cmds[i];
+			char *args[100];
+			int arg_count = 0;
+			tokenize(cmd, args, &arg_count, " \n");
+			if( execvp(args[0], args) < 0 ) {
+				printf("Shell: Incorrect command\n");
+				return;
+			}
+		}
+		else {
+			/* parent process */
+			wait(NULL);	// wait for child to terminate
+		}
+	}
+
+	/* last command */
+	// if( getpid() != shell_pid ) return;
+	pid = fork();
+	if( pid < 0 ) {
+		error_flag = true;
+		return;
+	}
+	else if( pid == 0 ) {
+		/* child process */
+		signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+		signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+		/* redirect stdin to read end of pipe */
+		close(pipefd[1]); // close unused write end
+		close(STDIN_FILENO);
+		dup2(pipefd[0], STDIN_FILENO);
+		close(pipefd[0]);
+
+		/* execute last command */
+		char *cmd = cmds[cmd_count - 1];
+		char *args[100];
+		int arg_count = 0;
+		tokenize(cmd, args, &arg_count, " \n");
+		print2dStr(args);
+		if( execvp(args[0], args) < 0 ) {
+			printf("Shell: Incorrect command\n");
+			return;
+		}
+	}
+	else {
+		/* parent process */
+		printf("inside last parent\n");
+		waitpid(pid, NULL, 1);	// wait for child to terminate
+	}
+
+	printf("pipe complete\n"); // debug
+	close(pipefd[0]);
+	close(pipefd[1]);
+}
+
+
 
 int main()
 {
@@ -310,8 +473,10 @@ int main()
 
 	pid_t shell_pid = getpid(); 
 
-	while(1)	// This loop will keep your shell running until user exits.
+	while(!exit_flag)	// This loop will keep your shell running until user exits.
 	{
+		error_flag = false; // debug // so that error can be inspected after each command execution if required
+
 		if( getpid() != shell_pid ) return 0; // ensure that any child process doesn't loop
 		// Print the prompt in format - currentWorkingDirectory$
 		printPrompt();
@@ -336,17 +501,22 @@ int main()
 		else if(cmd_type == RED) {
 			executeCommandRedirection(&exit_flag);	// This function is invoked when user wants redirect output of a single command to and output file specificed by user
 		}
-		else {
+		else if( cmd_type == PIPE ) {
+			executeCommandPipe(&exit_flag);
+		}
+		else if( cmd_type == SINGLE ) {
 			char *cmd = cmds[0];
 			if( cmd != NULL && cmd_count ) { // empty command, ignore
 				executeCommand(cmd, &exit_flag);		// This function is invoked when user wants to run a single commands
 			}
 		}
+		else if( cmd_type == ERR ) {
+			printf("Shell: Incorrect command\n");
+		}
 				
 		if(exit_flag)	// When user uses exit command.
 		{
 			printf("Exiting shell...\n");
-			break;
 		}
 
 		free(line);
@@ -358,4 +528,3 @@ int main()
 	
 	return 0;
 }
-
