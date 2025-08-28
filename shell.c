@@ -332,6 +332,69 @@ void executeCommandRedirection(bool *exit_flag)
 	}
 }
 
+void executeCommandPipeRefined(bool *exit_flag) {
+	int i;
+	int pipefd[2 * (cmd_count - 1)]; // each pipe needs 2 fds, for n commands we need n-1 pipes
+
+	/* create pipes */
+	for( i = 0; i < cmd_count - 1; i++ ) {
+		if( pipe(pipefd + i*2) < 0 ) {
+			error_flag = true;
+			return;
+		}
+	}
+
+	for( i = 0; i < cmd_count; i++ ) {
+		pid_t pid = fork();
+		if( pid < 0 ) {
+			error_flag = true;
+			return;
+		}
+		else if( pid == 0 ) {
+			/* child process */
+			signal(SIGINT, SIG_DFL);	// restore default SIGINT behavior in child process
+			signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
+
+			/* redirect stdin if not first command */
+			if( i != 0 ) {
+				dup2(pipefd[(i-1)*2], STDIN_FILENO);
+			}
+			/* redirect stdout if not last command */
+			if( i != cmd_count - 1 ) {
+				dup2(pipefd[i*2 + 1], STDOUT_FILENO);
+			}
+			/* close all pipe fds */
+			for( int j = 0; j < 2 * (cmd_count - 1); j++ ) {
+				close(pipefd[j]);
+			}
+
+			/* execute command */
+			char *cmd = cmds[i];
+			char *args[100];
+			int arg_count = 0;
+			tokenize(cmd, args, &arg_count, " \n");
+			// print2dStr(args); // debug
+			if( execvp(args[0], args) < 0 ) {
+				printf("Shell: Incorrect command\n");
+				return;
+			}
+		}
+		else {
+			/* parent process */
+			// do nothing
+		}
+	}
+
+	/* close all pipe fds in parent */
+	for( i = 0; i < 2 * (cmd_count - 1); i++ ) {
+		close(pipefd[i]);
+	}
+
+	/* wait for all child processes to terminate */
+	for( i = 0; i < cmd_count; i++ ) {
+		wait(NULL);
+	}
+}
 void executeCommandPipe(bool *exit_flag) {
 	/* flow : 
 		before loop : 
@@ -374,10 +437,9 @@ void executeCommandPipe(bool *exit_flag) {
 		signal(SIGTSTP, SIG_DFL);	// restore default SIGTSTP behavior in child process
 
 		/* redirect stdout to write end of pipe */
-		close(pipefd[0]); // close unused read end
-		close(STDOUT_FILENO);
 		dup2(pipefd[1], STDOUT_FILENO);
-		close(pipefd[1]);
+		close(pipefd[0]); // close unused read end in current child process
+		close(pipefd[1]); // free the duplicate file descriptor
 
 		/* execute first command */
 		char *cmd = cmds[0];
@@ -515,7 +577,7 @@ int main()
 			executeCommandRedirection(&exit_flag);	// This function is invoked when user wants redirect output of a single command to and output file specificed by user
 		}
 		else if( cmd_type == PIPE ) {
-			executeCommandPipe(&exit_flag);
+			executeCommandPipeRefined(&exit_flag);
 		}
 		else if( cmd_type == SINGLE ) {
 			char *cmd = cmds[0];
